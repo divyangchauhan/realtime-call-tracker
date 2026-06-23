@@ -1,11 +1,14 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
+import { randomUUID } from 'crypto';
 import { Repository } from 'typeorm';
 import { Configuration } from '../config/configuration';
 import { Call } from '../database/entities/call.entity';
 import { CallStatus } from '../database/entities/call-status.enum';
 import { RequestApiKey } from '../auth/auth.types';
+import { RateLimiterService } from '../rate-limit/rate-limiter.service';
+import { RateLimitExceededException } from '../rate-limit/rate-limit.exception';
 import { CallStateStore } from './call-state.store';
 import { CreateCallDto } from './dto/create-call.dto';
 import {
@@ -23,7 +26,6 @@ export interface CreateCallResult {
  * Business logic for the /calls endpoints.
  *
  * Extension points for upcoming PRs (do NOT implement here):
- *  - PR #5: insert a Redis Lua rate-limit gate before createCall persists.
  *  - PR #8: wrap the completed-transition in a transaction that also enqueues
  *           a BullMQ recording job.
  */
@@ -36,28 +38,67 @@ export class CallsService {
     private readonly callRepo: Repository<Call>,
     private readonly stateStore: CallStateStore,
     private readonly config: ConfigService<Configuration, true>,
+    private readonly rateLimiter: RateLimiterService,
   ) {}
 
   /**
    * Create a new call record and mirror it to Redis live state.
    *
-   * Write-through strategy:
-   *  1. Persist to Postgres (durable source of truth).
-   *  2. Mirror to Redis (best-effort — if Redis is down, GET /calls/:id
+   * Flow:
+   *  0. Pre-generate a UUID so the same ID is used for the rate-limit
+   *     reservation and the Postgres row.
+   *  1. Atomically check+reserve both rate-limit slots (Lua script, one round-trip).
+   *     Rejected calls throw RateLimitExceededException (HTTP 429) immediately —
+   *     NO DB write, NO Redis state is created for rejected calls.
+   *  2. Persist to Postgres (durable source of truth).
+   *  3. Mirror to Redis (best-effort — if Redis is down, GET /calls/:id
    *     falls back to Postgres automatically, so the call is not lost).
    */
   async createCall(apiKey: RequestApiKey, dto: CreateCallDto): Promise<CreateCallResult> {
-    // ── 1. Durable write to Postgres ─────────────────────────────────────────
+    // ── 0. Pre-generate call ID ───────────────────────────────────────────────
+    // We need the ID upfront so that the same UUID can be:
+    //   a) the rate-limit ZSET member and SET member (Lua script),
+    //   b) the Postgres primary key (passed explicitly to callRepo.create()).
+    // TypeORM honours an explicitly-assigned id on create() even when the
+    // column is @PrimaryGeneratedColumn('uuid').
+    const callId = randomUUID();
+
+    // ── 1. Rate-limit gate (atomic Lua, Redis) ────────────────────────────────
+    // This runs BEFORE any Postgres write so rejected calls never create rows.
+    const { allowed, reason } = await this.rateLimiter.acquire(
+      apiKey.id,
+      callId,
+      apiKey.maxConcurrent,
+      apiKey.maxCps,
+    );
+
+    if (!allowed) {
+      // The discriminated AcquireResult narrows `reason` to 'CPS'|'CONCURRENCY'
+      // here; the exception maps each to a message and always returns HTTP 429.
+      throw new RateLimitExceededException(reason);
+    }
+
+    // ── 2. Durable write to Postgres ─────────────────────────────────────────
     const entity = this.callRepo.create({
+      id: callId,
       apiKeyId: apiKey.id,
       fromNumber: dto.from,
       toNumber: dto.to,
       status: CallStatus.QUEUED,
       metadata: dto.metadata ?? null,
     });
-    const saved = await this.callRepo.save(entity);
+    let saved: Call;
+    try {
+      saved = await this.callRepo.save(entity);
+    } catch (err) {
+      // The rate-limit slot was reserved in step 1. If the durable write fails
+      // we must release it, otherwise the concurrency slot leaks until the SET
+      // safety TTL (up to CALL_STATE_TTL_SECONDS) expires.
+      await this.rateLimiter.release(apiKey.id, callId);
+      throw err;
+    }
 
-    // ── 2. Mirror to Redis (best-effort) ─────────────────────────────────────
+    // ── 3. Mirror to Redis (best-effort) ─────────────────────────────────────
     // If Redis is unavailable we log a warning but DO NOT fail the request —
     // the row is already durably in Postgres and the GET endpoint falls back.
     const ttl = this.config.get('call', { infer: true }).stateTtlSeconds;
@@ -82,7 +123,7 @@ export class CallsService {
       );
     }
 
-    // ── 3. Build response ────────────────────────────────────────────────────
+    // ── 4. Build response ────────────────────────────────────────────────────
     const wsBase = this.config.get('call', { infer: true }).wsPublicUrl;
     const websocket_url = `${wsBase}?callId=${saved.id}`;
 
