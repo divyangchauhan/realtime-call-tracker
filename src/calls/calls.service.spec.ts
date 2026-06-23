@@ -5,6 +5,8 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { RequestApiKey } from '../auth/auth.types';
 import { Call } from '../database/entities/call.entity';
 import { CallStatus } from '../database/entities/call-status.enum';
+import { RateLimiterService } from '../rate-limit/rate-limiter.service';
+import { RateLimitExceededException } from '../rate-limit/rate-limit.exception';
 import { CallStateStore } from './call-state.store';
 import { CallsService } from './calls.service';
 import { CreateCallDto } from './dto/create-call.dto';
@@ -51,6 +53,10 @@ describe('CallsService', () => {
     write: jest.Mock;
     read: jest.Mock;
   };
+  let rateLimiterMock: {
+    acquire: jest.Mock;
+    release: jest.Mock;
+  };
 
   beforeEach(async () => {
     repoMock = {
@@ -62,6 +68,12 @@ describe('CallsService', () => {
     stateStoreMock = {
       write: jest.fn().mockResolvedValue(undefined),
       read: jest.fn().mockResolvedValue(null),
+    };
+
+    // Default: rate limiter allows all calls through.
+    rateLimiterMock = {
+      acquire: jest.fn().mockResolvedValue({ allowed: true, reason: 'OK' }),
+      release: jest.fn().mockResolvedValue(undefined),
     };
 
     const configMock = {
@@ -77,6 +89,7 @@ describe('CallsService', () => {
         { provide: getRepositoryToken(Call), useValue: repoMock },
         { provide: CallStateStore, useValue: stateStoreMock },
         { provide: ConfigService, useValue: configMock },
+        { provide: RateLimiterService, useValue: rateLimiterMock },
       ],
     }).compile();
 
@@ -139,6 +152,80 @@ describe('CallsService', () => {
       expect(repoMock.save).toHaveBeenCalledTimes(1);
       // The result should still be returned normally.
       expect(result.call_id).toBe(MOCK_CALL_ID);
+    });
+
+    it('passes the pre-generated callId and api key limits to rateLimiter.acquire', async () => {
+      await service.createCall(MOCK_API_KEY, dto);
+
+      expect(rateLimiterMock.acquire).toHaveBeenCalledWith(
+        MOCK_API_KEY.id,
+        expect.any(String), // pre-generated callId (randomUUID)
+        MOCK_API_KEY.maxConcurrent,
+        MOCK_API_KEY.maxCps,
+      );
+    });
+
+    it('reserves and persists with the SAME pre-generated callId', async () => {
+      await service.createCall(MOCK_API_KEY, dto);
+
+      // The UUID handed to the rate limiter must be the exact id persisted, so
+      // the SET/ZSET member and the DB primary key cannot diverge.
+      const reservedCallId = rateLimiterMock.acquire.mock.calls[0][1] as string;
+      expect(repoMock.create).toHaveBeenCalledWith(expect.objectContaining({ id: reservedCallId }));
+    });
+
+    it('releases the reserved slot and rethrows when the Postgres persist fails', async () => {
+      const dbError = new Error('Postgres write failed');
+      repoMock.save.mockRejectedValueOnce(dbError);
+
+      await expect(service.createCall(MOCK_API_KEY, dto)).rejects.toThrow(dbError);
+
+      // The slot reserved before the failed save must be released with the
+      // same callId so it does not leak until the safety TTL.
+      const reservedCallId = rateLimiterMock.acquire.mock.calls[0][1] as string;
+      expect(rateLimiterMock.release).toHaveBeenCalledWith(MOCK_API_KEY.id, reservedCallId);
+    });
+
+    it('throws RateLimitExceededException (HTTP 429) and does NOT call callRepo.save when acquire returns CONCURRENCY', async () => {
+      rateLimiterMock.acquire.mockResolvedValueOnce({
+        allowed: false,
+        reason: 'CONCURRENCY',
+      });
+
+      await expect(service.createCall(MOCK_API_KEY, dto)).rejects.toThrow(
+        RateLimitExceededException,
+      );
+
+      // Postgres must NOT have been written for a rejected call.
+      expect(repoMock.save).not.toHaveBeenCalled();
+    });
+
+    it('throws RateLimitExceededException with HTTP 429 status when rate limit is exceeded', async () => {
+      rateLimiterMock.acquire.mockResolvedValueOnce({
+        allowed: false,
+        reason: 'CONCURRENCY',
+      });
+
+      try {
+        await service.createCall(MOCK_API_KEY, dto);
+        fail('Expected RateLimitExceededException to be thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(RateLimitExceededException);
+        expect((err as RateLimitExceededException).getStatus()).toBe(429);
+      }
+    });
+
+    it('throws RateLimitExceededException and does NOT call callRepo.save when acquire returns CPS', async () => {
+      rateLimiterMock.acquire.mockResolvedValueOnce({
+        allowed: false,
+        reason: 'CPS',
+      });
+
+      await expect(service.createCall(MOCK_API_KEY, dto)).rejects.toThrow(
+        RateLimitExceededException,
+      );
+
+      expect(repoMock.save).not.toHaveBeenCalled();
     });
   });
 
