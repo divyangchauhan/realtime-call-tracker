@@ -15,6 +15,10 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
+  // Enable Node.js process signal handling so NestJS can call OnModuleDestroy /
+  // OnApplicationShutdown hooks (e.g. Redis quit) before the process exits.
+  app.enableShutdownHooks();
+
   const configService = app.get(ConfigService);
   const port = configService.get<number>('app.port', 3000);
 
