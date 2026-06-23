@@ -53,6 +53,7 @@ services:
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       REDIS_HOST: ${REDIS_HOST:-redis}
       S3_ENDPOINT: ${S3_ENDPOINT:-http://localstack:4566}
+      DB_RUN_MIGRATIONS: "true"
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
     depends_on:
@@ -79,6 +80,7 @@ services:
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       REDIS_HOST: ${REDIS_HOST:-redis}
       S3_ENDPOINT: ${S3_ENDPOINT:-http://localstack:4566}
+      DB_RUN_MIGRATIONS: "false"
     depends_on:
       postgres:
         condition: service_healthy
