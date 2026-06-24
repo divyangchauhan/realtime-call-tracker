@@ -9,6 +9,7 @@ import { CallStatus } from '../database/entities/call-status.enum';
 import { RequestApiKey } from '../auth/auth.types';
 import { RateLimiterService } from '../rate-limit/rate-limiter.service';
 import { RateLimitExceededException } from '../rate-limit/rate-limit.exception';
+import { CallProgressionService } from './call-progression.service';
 import { CallStateStore } from './call-state.store';
 import { CreateCallDto } from './dto/create-call.dto';
 import {
@@ -39,6 +40,7 @@ export class CallsService {
     private readonly stateStore: CallStateStore,
     private readonly config: ConfigService<Configuration, true>,
     private readonly rateLimiter: RateLimiterService,
+    private readonly progression: CallProgressionService,
   ) {}
 
   /**
@@ -101,30 +103,41 @@ export class CallsService {
     // ── 3. Mirror to Redis (best-effort) ─────────────────────────────────────
     // If Redis is unavailable we log a warning but DO NOT fail the request —
     // the row is already durably in Postgres and the GET endpoint falls back.
-    const ttl = this.config.get('call', { infer: true }).stateTtlSeconds;
+    const callConfig = this.config.get('call', { infer: true });
+    const ttl = callConfig.stateTtlSeconds;
+
+    // Build the CallState we will mirror — reuse the same object for both the
+    // Redis write AND the progression engine so they share the identical snapshot.
+    const callState = {
+      id: saved.id,
+      apiKeyId: saved.apiKeyId,
+      from: saved.fromNumber,
+      to: saved.toNumber,
+      status: saved.status,
+      metadata: saved.metadata,
+      recordingUrl: saved.recordingUrl,
+      createdAt: saved.createdAt.toISOString(),
+      updatedAt: saved.updatedAt.toISOString(),
+    };
+
     try {
-      await this.stateStore.write(
-        {
-          id: saved.id,
-          apiKeyId: saved.apiKeyId,
-          from: saved.fromNumber,
-          to: saved.toNumber,
-          status: saved.status,
-          metadata: saved.metadata,
-          recordingUrl: saved.recordingUrl,
-          createdAt: saved.createdAt.toISOString(),
-          updatedAt: saved.updatedAt.toISOString(),
-        },
-        ttl,
-      );
+      await this.stateStore.write(callState, ttl);
     } catch (err) {
       this.logger.warn(
         `Redis write failed for call ${saved.id} — state missing from cache until next write. Error: ${String(err)}`,
       );
     }
 
-    // ── 4. Build response ────────────────────────────────────────────────────
-    const wsBase = this.config.get('call', { infer: true }).wsPublicUrl;
+    // ── 4. Schedule lifecycle progression (fire-and-forget) ──────────────────
+    // Hand the initial CallState to the progression engine so it can drive the
+    // state machine through RINGING → ANSWERED|UNANSWERED → COMPLETED on
+    // background timers.  schedule() is synchronous — it merely registers a
+    // setTimeout and returns immediately, so this call does NOT delay the HTTP
+    // 201 response.
+    this.progression.schedule(callState);
+
+    // ── 5. Build response ────────────────────────────────────────────────────
+    const wsBase = callConfig.wsPublicUrl;
     const websocket_url = `${wsBase}?callId=${saved.id}`;
 
     return { call_id: saved.id, websocket_url };

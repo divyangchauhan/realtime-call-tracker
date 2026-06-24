@@ -1,5 +1,14 @@
 import { plainToInstance } from 'class-transformer';
-import { IsBoolean, IsEnum, IsNumber, IsOptional, IsString, validateSync } from 'class-validator';
+import {
+  IsBoolean,
+  IsEnum,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+  validateSync,
+} from 'class-validator';
 
 enum Environment {
   Development = 'development',
@@ -68,6 +77,45 @@ class EnvironmentVariables {
   @IsOptional()
   @IsString()
   WS_PUBLIC_URL: string = 'ws://localhost:3000/ws';
+
+  // ── Call progression (PR #6) ────────────────────────────────────────────────
+  // All durations in milliseconds; probability is 0–1 float.
+  // These env vars are entirely optional — the defaults produce a realistic
+  // but fast-moving demo lifecycle (QUEUED→RINGING→ANSWERED→COMPLETED in ~6s).
+
+  /** Delay (ms) from QUEUED before the call starts RINGING. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  PROGRESSION_QUEUED_TO_RINGING_MS: number = 1000;
+
+  /** Duration (ms) the call rings before resolving to ANSWERED or UNANSWERED. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  PROGRESSION_RINGING_MS: number = 2000;
+
+  /** Delay (ms) from ANSWERED before the call reaches COMPLETED. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  PROGRESSION_ANSWERED_TO_COMPLETED_MS: number = 3000;
+
+  /** Delay (ms) from UNANSWERED before the call reaches COMPLETED. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  PROGRESSION_UNANSWERED_TO_COMPLETED_MS: number = 500;
+
+  /**
+   * Probability (0–1) that a RINGING call is ANSWERED.
+   * The complement (1 − p) results in UNANSWERED.
+   */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  PROGRESSION_ANSWER_PROBABILITY: number = 0.7;
 }
 
 /**
@@ -86,6 +134,25 @@ export function validate(config: Record<string, unknown>): EnvironmentVariables 
     // Coerce "true"/"false" strings to booleans for class-validator @IsBoolean
     DB_RUN_MIGRATIONS:
       config.DB_RUN_MIGRATIONS !== undefined ? String(config.DB_RUN_MIGRATIONS) !== 'false' : true,
+    // Progression timing — coerce string env vars to numbers.
+    PROGRESSION_QUEUED_TO_RINGING_MS:
+      config.PROGRESSION_QUEUED_TO_RINGING_MS !== undefined
+        ? Number(config.PROGRESSION_QUEUED_TO_RINGING_MS)
+        : 1000,
+    PROGRESSION_RINGING_MS:
+      config.PROGRESSION_RINGING_MS !== undefined ? Number(config.PROGRESSION_RINGING_MS) : 2000,
+    PROGRESSION_ANSWERED_TO_COMPLETED_MS:
+      config.PROGRESSION_ANSWERED_TO_COMPLETED_MS !== undefined
+        ? Number(config.PROGRESSION_ANSWERED_TO_COMPLETED_MS)
+        : 3000,
+    PROGRESSION_UNANSWERED_TO_COMPLETED_MS:
+      config.PROGRESSION_UNANSWERED_TO_COMPLETED_MS !== undefined
+        ? Number(config.PROGRESSION_UNANSWERED_TO_COMPLETED_MS)
+        : 500,
+    PROGRESSION_ANSWER_PROBABILITY:
+      config.PROGRESSION_ANSWER_PROBABILITY !== undefined
+        ? Number(config.PROGRESSION_ANSWER_PROBABILITY)
+        : 0.7,
   };
 
   const validatedConfig = plainToInstance(EnvironmentVariables, normalized, {

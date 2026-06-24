@@ -7,6 +7,7 @@ import { Call } from '../database/entities/call.entity';
 import { CallStatus } from '../database/entities/call-status.enum';
 import { RateLimiterService } from '../rate-limit/rate-limiter.service';
 import { RateLimitExceededException } from '../rate-limit/rate-limit.exception';
+import { CallProgressionService } from './call-progression.service';
 import { CallStateStore } from './call-state.store';
 import { CallsService } from './calls.service';
 import { CreateCallDto } from './dto/create-call.dto';
@@ -57,6 +58,9 @@ describe('CallsService', () => {
     acquire: jest.Mock;
     release: jest.Mock;
   };
+  let progressionMock: {
+    schedule: jest.Mock;
+  };
 
   beforeEach(async () => {
     repoMock = {
@@ -76,10 +80,22 @@ describe('CallsService', () => {
       release: jest.fn().mockResolvedValue(undefined),
     };
 
+    // Progression service: schedule() is fire-and-forget (void, synchronous).
+    progressionMock = {
+      schedule: jest.fn(),
+    };
+
     const configMock = {
       get: jest.fn().mockReturnValue({
         stateTtlSeconds: 3600,
         wsPublicUrl: 'ws://localhost:3000/ws',
+        progression: {
+          queuedToRingingMs: 1000,
+          ringingMs: 2000,
+          answeredToCompletedMs: 3000,
+          unansweredToCompletedMs: 500,
+          answerProbability: 0.7,
+        },
       }),
     };
 
@@ -90,6 +106,7 @@ describe('CallsService', () => {
         { provide: CallStateStore, useValue: stateStoreMock },
         { provide: ConfigService, useValue: configMock },
         { provide: RateLimiterService, useValue: rateLimiterMock },
+        { provide: CallProgressionService, useValue: progressionMock },
       ],
     }).compile();
 
@@ -152,6 +169,9 @@ describe('CallsService', () => {
       expect(repoMock.save).toHaveBeenCalledTimes(1);
       // The result should still be returned normally.
       expect(result.call_id).toBe(MOCK_CALL_ID);
+      // Progression must still be scheduled even though the cache write failed —
+      // it is intentionally independent of the best-effort Redis mirror.
+      expect(progressionMock.schedule).toHaveBeenCalledTimes(1);
     });
 
     it('passes the pre-generated callId and api key limits to rateLimiter.acquire', async () => {
@@ -226,6 +246,34 @@ describe('CallsService', () => {
       );
 
       expect(repoMock.save).not.toHaveBeenCalled();
+    });
+
+    it('calls progression.schedule exactly once after a successful create', async () => {
+      await service.createCall(MOCK_API_KEY, dto);
+
+      expect(progressionMock.schedule).toHaveBeenCalledTimes(1);
+      // The scheduled state must include the correct call ID and QUEUED status.
+      expect(progressionMock.schedule).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: MOCK_CALL_ID,
+          apiKeyId: MOCK_API_KEY.id,
+          status: CallStatus.QUEUED,
+        }),
+      );
+    });
+
+    it('does NOT call progression.schedule when the call is rate-limited (429)', async () => {
+      rateLimiterMock.acquire.mockResolvedValueOnce({
+        allowed: false,
+        reason: 'CONCURRENCY',
+      });
+
+      await expect(service.createCall(MOCK_API_KEY, dto)).rejects.toThrow(
+        RateLimitExceededException,
+      );
+
+      // The progression machine must NOT be started for rejected calls.
+      expect(progressionMock.schedule).not.toHaveBeenCalled();
     });
   });
 
