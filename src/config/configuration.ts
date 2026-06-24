@@ -20,6 +20,36 @@ export interface Configuration {
     host: string;
     port: number;
   };
+  /**
+   * AWS S3 (or LocalStack) configuration used by RecordingStorageService (PR #9).
+   * Defaults allow the worker to talk to the docker-compose LocalStack service
+   * without any extra environment setup.
+   */
+  s3: {
+    /** HTTP endpoint for LocalStack (or real AWS when blank). */
+    endpoint: string;
+    region: string;
+    accessKeyId: string;
+    secretAccessKey: string;
+    /** Bucket that holds recorded-call audio files. */
+    bucket: string;
+    /**
+     * Force path-style URLs (e.g. http://host/bucket/key) instead of the
+     * default virtual-host style (bucket.host/key).  LocalStack requires this.
+     */
+    forcePathStyle: boolean;
+  };
+  /**
+   * Recording-worker configuration (PR #9).
+   */
+  recording: {
+    /**
+     * Filesystem path to the mock MP3 asset that the worker uploads to S3.
+     * Resolved against process.cwd() at use time.
+     * Env var: MOCK_RECORDING_PATH (default: assets/mock_recording.mp3).
+     */
+    mockFilePath: string;
+  };
   call: {
     /** Seconds to keep live call state in Redis. Default 3600 (1 hour). */
     stateTtlSeconds: number;
@@ -71,6 +101,24 @@ export default (): Configuration => ({
   redis: {
     host: process.env.REDIS_HOST ?? 'redis',
     port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
+  },
+  s3: {
+    // This project targets LocalStack (port 4566 on the docker-compose network),
+    // so path-style addressing is required and hardcoded below. Pointing at real
+    // AWS would additionally require making forcePathStyle configurable and using
+    // the regional endpoint — out of scope for this take-home.
+    endpoint: process.env.S3_ENDPOINT ?? 'http://localstack:4566',
+    region: process.env.AWS_REGION ?? 'us-east-1',
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
+    bucket: process.env.S3_BUCKET ?? 'call-recordings',
+    // LocalStack requires path-style URLs; the SDK default is virtual-host style.
+    forcePathStyle: true,
+  },
+  recording: {
+    // Resolved against process.cwd() at use time so it works in both the
+    // ts-node (cwd = project root) and compiled dist (cwd = /app) contexts.
+    mockFilePath: process.env.MOCK_RECORDING_PATH ?? 'assets/mock_recording.mp3',
   },
   call: {
     stateTtlSeconds: parseInt(process.env.CALL_STATE_TTL_SECONDS ?? '3600', 10),

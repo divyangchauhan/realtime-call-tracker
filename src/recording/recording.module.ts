@@ -15,8 +15,9 @@ import { RecordingDispatchService } from './recording-dispatch.service';
  * RecordingDispatchService is both provided and exported so CallsModule (which
  * imports RecordingModule) can inject it into CallCompletionService.
  *
- * The PR #9 @Processor worker will be added here as an additional provider
- * when the consumer is implemented.
+ * The consumer side (the @Processor that uploads recordings) lives in
+ * RecordingWorkerModule, which is imported ONLY by the worker process's
+ * WorkerModule — keeping the API process free of a BullMQ Worker thread.
  */
 @Module({
   imports: [

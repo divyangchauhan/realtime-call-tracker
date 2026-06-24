@@ -1,35 +1,46 @@
 /**
- * Worker entrypoint — STUB (to be expanded in PR #9).
+ * Worker process entrypoint.
  *
- * In PR #9 this process will host the BullMQ consumer that drives
- * call-state transitions (QUEUED → RINGING → ANSWERED/UNANSWERED → COMPLETED).
- * For now it simply initialises the Nest application context and stays alive.
+ * Boots a lean NestJS application context (no HTTP server) from WorkerModule,
+ * which registers the BullMQ @Processor('recording') consumer and all the
+ * infrastructure it needs (Postgres, Redis, S3 config).
+ *
+ * Why createApplicationContext instead of create?
+ *   createApplicationContext skips the HTTP adapter entirely — no Express server,
+ *   no listening socket.  The event loop is kept alive by the BullMQ Worker
+ *   thread that @nestjs/bullmq spins up for the @Processor decorator.
+ *
+ * Why enableShutdownHooks?
+ *   Nest's shutdown hooks wire SIGINT/SIGTERM to the DI container's onModuleDestroy
+ *   lifecycle.  This lets RedisModule (lifecycle host), TypeORM, and BullMQ drain
+ *   their connections gracefully before the process exits.  The manual setInterval
+ *   keep-alive and SIGTERM handler from the original stub are removed — the
+ *   running BullMQ Worker already keeps the event loop alive, and Nest handles
+ *   the shutdown sequence.
  */
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
-import { AppModule } from './app.module';
+import { WorkerModule } from './worker.module';
 
 async function bootstrap(): Promise<void> {
   const logger = new Logger('Worker');
 
-  // Create a standalone application context (no HTTP server)
-  const app = await NestFactory.createApplicationContext(AppModule);
+  // Create a standalone application context (no HTTP server).
+  // WorkerModule brings in Config, Database, Redis, BullMQ root, and the
+  // RecordingWorkerModule with its @Processor consumer.
+  const app = await NestFactory.createApplicationContext(WorkerModule);
 
-  logger.log('Worker started');
+  // Nest shutdown hooks close the BullMQ Worker, Redis connections, and TypeORM
+  // pool gracefully on SIGINT/SIGTERM.  This replaces the manual process.on()
+  // handler in the original stub.
+  app.enableShutdownHooks();
 
-  // Explicit keep-alive handle so the event loop stays open and the process
-  // does not exit immediately (which would cause a Docker restart-loop).
-  // BullMQ listeners added in PR #9 will take over this role.
-  const keepAlive = setInterval(() => {
-    /* noop until BullMQ listeners land in PR #9 */
-  }, 2_147_483_647);
-
-  process.on('SIGTERM', () => {
-    logger.log('Worker received SIGTERM, shutting down');
-    clearInterval(keepAlive);
-    void app.close();
-    process.exit(0);
-  });
+  logger.log('Recording worker started');
 }
 
-bootstrap();
+// Surface a boot failure (e.g. Postgres/Redis unreachable) explicitly rather
+// than emitting an unhandled rejection warning and exiting ambiguously.
+bootstrap().catch((err: unknown) => {
+  console.error('Worker failed to start:', err);
+  process.exit(1);
+});
