@@ -6,6 +6,7 @@ import { CallStatus } from '../database/entities/call-status.enum';
 import { RateLimiterService } from '../rate-limit/rate-limiter.service';
 import { REDIS_CLIENT } from '../redis/redis.constants';
 import { CALL_EVENTS_CHANNEL } from './call-events.constants';
+import { CallCompletionService } from './call-completion.service';
 import { CallState, CallStateStore } from './call-state.store';
 import { callResponseFromState } from './dto/call-response.dto';
 
@@ -66,6 +67,7 @@ export class CallProgressionService implements OnModuleDestroy {
     private readonly rateLimiter: RateLimiterService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     private readonly config: ConfigService<Configuration, true>,
+    private readonly completion: CallCompletionService,
   ) {}
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -165,23 +167,38 @@ export class CallProgressionService implements OnModuleDestroy {
   /**
    * Transition: ANSWERED | UNANSWERED → COMPLETED (terminal).
    *
-   * Additionally:
-   *  - Releases the rate-limit concurrency slot.
-   *  - Removes the call from the pending-timer map.
-   *
-   * PR #8 seam: COMPLETED is where Postgres write-through + BullMQ recording
-   * dispatch will hook in.
+   * Execution order on the COMPLETED transition:
+   *  1. applyTransition() — Redis write-behind (updateStatus) + publish to
+   *     call:events channel so WS clients receive the COMPLETED event promptly.
+   *  2. completion.complete() — Postgres write-through (status=COMPLETED,
+   *     completed_at=now) + BullMQ recording job dispatch (best-effort).
+   *     complete() already swallows all exceptions internally, but we wrap
+   *     with a catch for belt-and-suspenders safety (it's in a timer callback).
+   *  3. rateLimiter.release() — frees the concurrency slot so the API key can
+   *     accept a new in-flight call.
    */
   private async transitionToCompleted(state: CallState): Promise<void> {
     this.pendingTimers.delete(state.id);
 
+    // Step 1: Redis write-behind + WS pub/sub event.
     await this.applyTransition(state, CallStatus.COMPLETED);
 
-    // Release the concurrency slot so this API key can accept a new in-flight call.
-    // best-effort — RateLimiterService.release() already swallows its own errors.
-    await this.rateLimiter.release(state.apiKeyId, state.id);
+    // Step 2: Postgres write-through + BullMQ recording dispatch.
+    // complete() never throws (swallows internally), but guard anyway since
+    // this runs inside a timer callback where an unhandledRejection would crash.
+    try {
+      await this.completion.complete(state);
+    } catch (err) {
+      this.logger.warn(
+        `Unexpected error from CallCompletionService.complete() for call ${state.id}. ` +
+          `Error: ${String(err)}`,
+      );
+    }
 
-    // PR #8 seam: COMPLETED is where Postgres write-through + BullMQ recording dispatch will hook in.
+    // Step 3: Release the concurrency slot so this API key can accept a new
+    // in-flight call.  best-effort — RateLimiterService.release() already
+    // swallows its own errors.
+    await this.rateLimiter.release(state.apiKeyId, state.id);
   }
 
   // ── Shared helpers ───────────────────────────────────────────────────────────
