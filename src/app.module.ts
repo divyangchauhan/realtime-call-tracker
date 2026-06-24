@@ -7,6 +7,7 @@ import { CallsModule } from './calls/calls.module';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { RedisModule } from './redis/redis.module';
+import { WebsocketModule } from './websocket/websocket.module';
 
 @Module({
   imports: [
@@ -16,14 +17,18 @@ import { RedisModule } from './redis/redis.module';
       validate,
     }),
     DatabaseModule,
-    // RedisModule is @Global() — import it early so REDIS_CLIENT is available
-    // to all feature modules without explicit re-imports.
+    // RedisModule is @Global() — import it early so REDIS_CLIENT and
+    // REDIS_SUBSCRIBER are available to all feature modules without explicit
+    // re-imports.
     RedisModule,
     // AuthModule registers ApiKeyAuthGuard as a global APP_GUARD.
     // Import it after DatabaseModule so the TypeORM connection is available.
     AuthModule,
     CallsModule,
     HealthModule,
+    // WebsocketModule registers CallsGateway which streams live call-state
+    // transitions to connected WS clients (PR #7).
+    WebsocketModule,
   ],
 })
 export class AppModule {}
