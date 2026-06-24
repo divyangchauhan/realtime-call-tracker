@@ -1,0 +1,22 @@
+node_modules
+dist
+coverage
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+.DS_Store
+.idea
+*.swp
+*.swo
+README.md
+.prettierrc
+eslint.config.mjs
+# NOTE: tsconfig.json, tsconfig.build.json and nest-cli.json are intentionally
+# NOT ignored - the builder stage runs `nest build`, which requires them.
