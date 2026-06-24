@@ -120,6 +120,47 @@ export class CallStateStore {
   }
 
   /**
+   * Write-behind recording URL update: set only `recordingUrl` + `updatedAt` on
+   * the existing hash and refresh the TTL.
+   *
+   * Called by the BullMQ recording worker (PR #9) after a successful S3 upload.
+   * We intentionally touch only two fields — not the full state — so the op is
+   * cheap and does NOT require reading/re-writing the entire hash.
+   *
+   * Why this is best-effort from the worker's perspective:
+   *   The durable source of truth for the recording URL is the Postgres `calls`
+   *   row (written first, with throw-to-retry semantics).  The Redis hash is a
+   *   read-through cache; if this update fails the next GET /calls/:id will fall
+   *   back to Postgres and rebuild the cache automatically.  Failing the BullMQ
+   *   job over a Redis cache miss would cause unnecessary retries and duplicate S3
+   *   uploads, so the worker catches this method's rejection and logs it instead.
+   *
+   * Uses the same pipeline (HSET + EXPIRE) pattern as updateStatus() — see its
+   * comment for the ioredis error-surfacing detail.
+   */
+  async updateRecordingUrl(
+    id: string,
+    recordingUrl: string,
+    updatedAt: string,
+    ttlSeconds: number,
+  ): Promise<void> {
+    const key = callKey(id);
+
+    const pipeline = this.redis.pipeline();
+    pipeline.hset(key, { recordingUrl, updatedAt });
+    pipeline.expire(key, ttlSeconds);
+
+    // Surface the first command error so the caller's catch block can log it.
+    // ioredis resolves exec() with [error, result] tuples — it does NOT reject
+    // on individual command failures, so we must inspect manually.
+    const results = await pipeline.exec();
+    const firstError = results?.find(([err]) => err)?.[0];
+    if (firstError) {
+      throw firstError;
+    }
+  }
+
+  /**
    * Read the call state from Redis.
    * Returns null when the key does not exist or has expired.
    */

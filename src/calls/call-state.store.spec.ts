@@ -189,6 +189,49 @@ describe('CallStateStore', () => {
     });
   });
 
+  // ── updateRecordingUrl ───────────────────────────────────────────────────────
+
+  describe('updateRecordingUrl', () => {
+    it('HSETs only recordingUrl + updatedAt and refreshes EXPIRE', async () => {
+      const pipeline = makePipelineMock();
+      redisMock.pipeline.mockReturnValue(pipeline);
+
+      await store.updateRecordingUrl(
+        'uuid-10',
+        'http://localstack:4566/call-recordings/recordings/uuid-10.mp3',
+        '2024-01-01T00:02:00.000Z',
+        3600,
+      );
+
+      expect(redisMock.pipeline).toHaveBeenCalledTimes(1);
+      expect(pipeline.hset).toHaveBeenCalledWith('call:uuid-10', {
+        recordingUrl: 'http://localstack:4566/call-recordings/recordings/uuid-10.mp3',
+        updatedAt: '2024-01-01T00:02:00.000Z',
+      });
+      expect(pipeline.expire).toHaveBeenCalledWith('call:uuid-10', 3600);
+      expect(pipeline.exec).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws when a pipelined command reports an error (pipeline exec fails)', async () => {
+      const pipeline = makePipelineMock();
+      const redisErr = new Error('Connection is closed.');
+      pipeline.exec.mockResolvedValue([
+        [redisErr, null],
+        [null, 1],
+      ]);
+      redisMock.pipeline.mockReturnValue(pipeline);
+
+      await expect(
+        store.updateRecordingUrl(
+          'uuid-11',
+          'http://localstack:4566/call-recordings/recordings/uuid-11.mp3',
+          '2024-01-01T00:03:00.000Z',
+          3600,
+        ),
+      ).rejects.toThrow('Connection is closed.');
+    });
+  });
+
   // ── read ─────────────────────────────────────────────────────────────────────
 
   describe('read', () => {

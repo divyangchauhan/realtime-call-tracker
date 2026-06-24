@@ -33,6 +33,11 @@ RUN pnpm install --frozen-lockfile --prod
 # Copy compiled output from builder
 COPY --from=builder /app/dist ./dist
 
+# Copy the mock recording asset so the worker process can read it at runtime.
+# The file lives at assets/mock_recording.mp3 and is resolved against
+# process.cwd() (/app) by the recording.mockFilePath config default.
+COPY --from=builder /app/assets ./assets
+
 # Default command starts the API server.
 # The worker service in docker-compose.yml overrides this with: node dist/worker
 CMD ["node", "dist/main"]

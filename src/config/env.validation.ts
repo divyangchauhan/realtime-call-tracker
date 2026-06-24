@@ -116,6 +116,36 @@ class EnvironmentVariables {
   @Min(0)
   @Max(1)
   PROGRESSION_ANSWER_PROBABILITY: number = 0.7;
+
+  // ── S3 / LocalStack (PR #9) ─────────────────────────────────────────────────
+  // All optional; defaults point to the docker-compose LocalStack service.
+
+  @IsOptional()
+  @IsString()
+  S3_ENDPOINT: string = 'http://localstack:4566';
+
+  @IsOptional()
+  @IsString()
+  AWS_REGION: string = 'us-east-1';
+
+  @IsOptional()
+  @IsString()
+  AWS_ACCESS_KEY_ID: string = 'test';
+
+  @IsOptional()
+  @IsString()
+  AWS_SECRET_ACCESS_KEY: string = 'test';
+
+  @IsOptional()
+  @IsString()
+  S3_BUCKET: string = 'call-recordings';
+
+  // ── Recording worker (PR #9) ────────────────────────────────────────────────
+
+  /** Path to the mock MP3 file the worker uploads. Resolved against cwd. */
+  @IsOptional()
+  @IsString()
+  MOCK_RECORDING_PATH: string = 'assets/mock_recording.mp3';
 }
 
 /**
