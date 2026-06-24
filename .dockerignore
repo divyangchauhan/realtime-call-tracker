@@ -18,6 +18,5 @@ yarn-error.log*
 README.md
 .prettierrc
 eslint.config.mjs
-tsconfig.json
-tsconfig.build.json
-nest-cli.json
+# NOTE: tsconfig.json, tsconfig.build.json and nest-cli.json are intentionally
+# NOT ignored — the builder stage runs `nest build`, which requires them.

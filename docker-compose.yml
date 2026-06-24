@@ -30,7 +30,10 @@ services:
       start_period: 5s
 
   localstack:
-    image: localstack/localstack:latest
+    # Pinned to a Community release: the `latest` tag now resolves to a
+    # Pro-by-default image that exits on startup unless LOCALSTACK_AUTH_TOKEN is
+    # set. 3.x Community provides the S3 emulation this project needs, license-free.
+    image: localstack/localstack:3.5
     restart: unless-stopped
     environment:
       SERVICES: s3
