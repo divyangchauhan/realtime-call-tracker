@@ -53,7 +53,7 @@ const PROGRESSION_CONFIG = {
 
 describe('CallProgressionService', () => {
   let service: CallProgressionService;
-  let stateStoreMock: { updateStatus: jest.Mock };
+  let stateStoreMock: { updateStatus: jest.Mock; markDirty: jest.Mock };
   let rateLimiterMock: { release: jest.Mock };
   let redisMock: { publish: jest.Mock };
   let completionMock: { complete: jest.Mock };
@@ -61,7 +61,10 @@ describe('CallProgressionService', () => {
   beforeEach(async () => {
     jest.useFakeTimers();
 
-    stateStoreMock = { updateStatus: jest.fn().mockResolvedValue(undefined) };
+    stateStoreMock = {
+      updateStatus: jest.fn().mockResolvedValue(undefined),
+      markDirty: jest.fn().mockResolvedValue(undefined),
+    };
     rateLimiterMock = { release: jest.fn().mockResolvedValue(undefined) };
     redisMock = { publish: jest.fn().mockResolvedValue(1) };
     // CallCompletionService mock: complete() resolves immediately (best-effort).
@@ -265,6 +268,75 @@ describe('CallProgressionService', () => {
 
       // Before any timers advance: no Redis calls yet (machine is timer-driven).
       expect(stateStoreMock.updateStatus).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Dirty-marking for PR #10's flush ──────────────────────────────────────
+
+  describe('dirty-marking', () => {
+    it('marks the call dirty on a non-terminal transition (RINGING)', async () => {
+      jest.spyOn(service as any, 'pickRingOutcome').mockReturnValue(CallStatus.ANSWERED);
+
+      service.schedule(makeCallState());
+
+      await jest.advanceTimersByTimeAsync(PROGRESSION_CONFIG.queuedToRingingMs);
+
+      expect(stateStoreMock.markDirty).toHaveBeenCalledTimes(1);
+      expect(stateStoreMock.markDirty).toHaveBeenCalledWith('call-uuid-test');
+    });
+
+    it('marks the call dirty for ANSWERED and UNANSWERED but not for COMPLETED', async () => {
+      jest.spyOn(service as any, 'pickRingOutcome').mockReturnValue(CallStatus.ANSWERED);
+
+      service.schedule(makeCallState());
+
+      await jest.advanceTimersByTimeAsync(
+        PROGRESSION_CONFIG.queuedToRingingMs +
+          PROGRESSION_CONFIG.ringingMs +
+          PROGRESSION_CONFIG.answeredToCompletedMs,
+      );
+
+      // RINGING and ANSWERED → dirty; COMPLETED → must NOT be marked dirty
+      // (it is reconciled synchronously by CallCompletionService instead).
+      // Exactly two single-arg SADDs against three status updates proves the
+      // COMPLETED transition was excluded from dirty-marking.
+      expect(stateStoreMock.updateStatus).toHaveBeenCalledTimes(3);
+      expect(stateStoreMock.markDirty.mock.calls).toEqual([['call-uuid-test'], ['call-uuid-test']]);
+    });
+
+    it('does not mark dirty on the COMPLETED transition (UNANSWERED path)', async () => {
+      jest.spyOn(service as any, 'pickRingOutcome').mockReturnValue(CallStatus.UNANSWERED);
+
+      service.schedule(makeCallState());
+
+      await jest.advanceTimersByTimeAsync(
+        PROGRESSION_CONFIG.queuedToRingingMs +
+          PROGRESSION_CONFIG.ringingMs +
+          PROGRESSION_CONFIG.unansweredToCompletedMs,
+      );
+
+      // RINGING and UNANSWERED → dirty (2 calls); COMPLETED is excluded.
+      expect(stateStoreMock.markDirty).toHaveBeenCalledTimes(2);
+    });
+
+    it('continues the machine when markDirty rejects', async () => {
+      jest.spyOn(service as any, 'pickRingOutcome').mockReturnValue(CallStatus.ANSWERED);
+
+      stateStoreMock.markDirty
+        .mockRejectedValueOnce(new Error('Redis SADD failed'))
+        .mockResolvedValue(undefined);
+
+      await expect(
+        (async () => {
+          service.schedule(makeCallState());
+          await jest.advanceTimersByTimeAsync(PROGRESSION_CONFIG.queuedToRingingMs);
+          await jest.advanceTimersByTimeAsync(PROGRESSION_CONFIG.ringingMs);
+          await jest.advanceTimersByTimeAsync(PROGRESSION_CONFIG.answeredToCompletedMs);
+        })(),
+      ).resolves.not.toThrow();
+
+      expect(stateStoreMock.updateStatus).toHaveBeenCalledTimes(3);
+      expect(rateLimiterMock.release).toHaveBeenCalledTimes(1);
     });
   });
 

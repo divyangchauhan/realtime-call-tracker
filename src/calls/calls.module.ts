@@ -4,6 +4,7 @@ import { Call } from '../database/entities/call.entity';
 import { RateLimitModule } from '../rate-limit/rate-limit.module';
 import { RecordingModule } from '../recording/recording.module';
 import { CallCompletionService } from './call-completion.service';
+import { CallFlushService } from './call-flush.service';
 import { CallProgressionService } from './call-progression.service';
 import { CallStateStore } from './call-state.store';
 import { CallsController } from './calls.controller';
@@ -25,6 +26,11 @@ import { CallsService } from './calls.service';
  * CallStateStore is exported so WebsocketModule (PR #7) can inject it for the
  * initial snapshot read on WebSocket connect.  RedisModule is @Global() so
  * WebsocketModule does not need to import it explicitly.
+ *
+ * CallFlushService (PR #10) periodically reconciles the Redis write-behind
+ * dirty set into Postgres. It is registered here (API process only) — the
+ * BullMQ recording worker process does not import CallsModule, so it never
+ * runs a flush loop.
  */
 @Module({
   imports: [
@@ -37,7 +43,14 @@ import { CallsService } from './calls.service';
     RecordingModule,
   ],
   controllers: [CallsController],
-  providers: [CallsService, CallStateStore, CallProgressionService, CallCompletionService],
+  providers: [
+    CallsService,
+    CallStateStore,
+    CallProgressionService,
+    CallCompletionService,
+    // CallFlushService (PR #10): periodic write-behind reconciler, API process only.
+    CallFlushService,
+  ],
   // Export CallStateStore so WebsocketModule can import CallsModule and inject
   // it into CallsGateway for the on-connect snapshot read.
   exports: [CallStateStore],

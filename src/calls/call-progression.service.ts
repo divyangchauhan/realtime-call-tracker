@@ -27,7 +27,9 @@ import { callResponseFromState } from './dto/call-response.dto';
  *   Intermediate transitions update ONLY the Redis live-state hash (via
  *   CallStateStore.updateStatus).  Postgres is NOT touched for these in-flight
  *   transitions — the Postgres row stays at its initial QUEUED status until a
- *   later PR reconciles it.
+ *   later PR reconciles it.  Each non-terminal transition also marks the call
+ *   ID dirty (CallStateStore.markDirty) so PR #10's CallFlushService knows to
+ *   reconcile it into Postgres on its next periodic pass.
  *
  * Pub/sub:
  *   Every transition PUBLISHes the `callResponseFromState` JSON payload on the
@@ -232,6 +234,25 @@ export class CallProgressionService implements OnModuleDestroy {
       );
       // Continue the machine — a stale hash is recoverable; crashing the process
       // from inside a timer callback is not.
+    }
+
+    // ── Dirty-mark for PR #10's flush ────────────────────────────────────────
+    // Every non-terminal transition leaves Postgres behind the Redis hash, so
+    // record the call ID in the dirty set for CallFlushService to reconcile.
+    // COMPLETED is excluded: it goes through CallCompletionService's synchronous
+    // Postgres write-through instead, so there is nothing to flush for it.
+    // Best-effort and isolated in its own try/catch — a failure to mark dirty
+    // must never break the state machine; at worst the flush misses this call
+    // until its next transition (if any) re-marks it.
+    if (newStatus !== CallStatus.COMPLETED) {
+      try {
+        await this.stateStore.markDirty(state.id);
+      } catch (err) {
+        this.logger.warn(
+          `Redis markDirty failed for call ${state.id} (${previousStatus}→${newStatus}). ` +
+            `Postgres reconciliation may be delayed until the next transition. Error: ${String(err)}`,
+        );
+      }
     }
 
     // ── Publish transition event ─────────────────────────────────────────────
