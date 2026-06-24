@@ -156,6 +156,39 @@ describe('CallStateStore', () => {
     });
   });
 
+  // ── updateStatus ─────────────────────────────────────────────────────────────
+
+  describe('updateStatus', () => {
+    it('HSETs only status + updatedAt and refreshes EXPIRE', async () => {
+      const pipeline = makePipelineMock();
+      redisMock.pipeline.mockReturnValue(pipeline);
+
+      await store.updateStatus('uuid-5', CallStatus.RINGING, '2024-01-01T00:00:01.000Z', 3600);
+
+      expect(redisMock.pipeline).toHaveBeenCalledTimes(1);
+      expect(pipeline.hset).toHaveBeenCalledWith('call:uuid-5', {
+        status: CallStatus.RINGING,
+        updatedAt: '2024-01-01T00:00:01.000Z',
+      });
+      expect(pipeline.expire).toHaveBeenCalledWith('call:uuid-5', 3600);
+      expect(pipeline.exec).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws when a pipelined command reports an error', async () => {
+      const pipeline = makePipelineMock();
+      const redisErr = new Error('Connection is closed.');
+      pipeline.exec.mockResolvedValue([
+        [redisErr, null],
+        [null, 1],
+      ]);
+      redisMock.pipeline.mockReturnValue(pipeline);
+
+      await expect(
+        store.updateStatus('uuid-6', CallStatus.COMPLETED, '2024-01-01T00:00:02.000Z', 3600),
+      ).rejects.toThrow('Connection is closed.');
+    });
+  });
+
   // ── read ─────────────────────────────────────────────────────────────────────
 
   describe('read', () => {
@@ -163,6 +196,19 @@ describe('CallStateStore', () => {
       redisMock.hgetall.mockResolvedValue({});
 
       const result = await store.read('nonexistent-id');
+      expect(result).toBeNull();
+    });
+
+    it('returns null for a partial/skeleton hash missing identifying fields', async () => {
+      // updateStatus() can materialise a key with only status+updatedAt if the
+      // full write() never landed. Such a hash must be treated as a cache miss
+      // so getCall falls back to Postgres instead of 404-ing on an empty apiKeyId.
+      redisMock.hgetall.mockResolvedValue({
+        status: 'RINGING',
+        updatedAt: '2024-01-01T00:00:01.000Z',
+      });
+
+      const result = await store.read('uuid-1');
       expect(result).toBeNull();
     });
 

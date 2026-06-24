@@ -87,6 +87,39 @@ export class CallStateStore {
   }
 
   /**
+   * Write-behind status update: set only `status` + `updatedAt` on the existing
+   * hash and refresh the TTL.
+   *
+   * This is the hot path called by the progression engine on every state
+   * transition.  We intentionally touch only two fields so the operation is
+   * cheap and does NOT require reading the full state first.
+   *
+   * The TTL is refreshed with every transition so an active call's hash does
+   * not expire while it is still progressing.
+   *
+   * Uses a pipeline (HSET + EXPIRE) identical to write() so error surfacing
+   * follows the same pattern — the caller should treat failures as best-effort.
+   */
+  async updateStatus(
+    id: string,
+    status: CallStatus,
+    updatedAt: string,
+    ttlSeconds: number,
+  ): Promise<void> {
+    const key = callKey(id);
+
+    const pipeline = this.redis.pipeline();
+    pipeline.hset(key, { status, updatedAt });
+    pipeline.expire(key, ttlSeconds);
+
+    const results = await pipeline.exec();
+    const firstError = results?.find(([err]) => err)?.[0];
+    if (firstError) {
+      throw firstError;
+    }
+  }
+
+  /**
    * Read the call state from Redis.
    * Returns null when the key does not exist or has expired.
    */
@@ -95,6 +128,18 @@ export class CallStateStore {
 
     // hgetall returns {} when the key is missing.
     if (!raw || Object.keys(raw).length === 0) {
+      return null;
+    }
+
+    // Guard against a PARTIAL hash. The write-behind updateStatus() path does a
+    // blind HSET of just status+updatedAt; if it ever runs against a key whose
+    // full write() never landed (e.g. Redis was down at create time and only
+    // recovered before the first progression transition), Redis materialises a
+    // skeleton hash with only those two fields. Trusting it would yield an empty
+    // apiKeyId and make GET /calls/:id 404 instead of falling back to Postgres.
+    // Treat any hash missing its identifying fields as a cache miss so the
+    // durable Postgres copy serves the request.
+    if (!raw['id'] || !raw['apiKeyId']) {
       return null;
     }
 

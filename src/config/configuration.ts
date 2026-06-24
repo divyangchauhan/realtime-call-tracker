@@ -28,6 +28,30 @@ export interface Configuration {
      * PR #7 will stand up the actual gateway at this address.
      */
     wsPublicUrl: string;
+    /**
+     * Timing and probability parameters for the background auto-progression
+     * engine (PR #6).  Each field drives one leg of the state machine:
+     *
+     *   QUEUED ──[queuedToRingingMs]──► RINGING
+     *   RINGING ──[ringingMs]──► ANSWERED (p=answerProbability) | UNANSWERED
+     *   ANSWERED ──[answeredToCompletedMs]──► COMPLETED
+     *   UNANSWERED ──[unansweredToCompletedMs]──► COMPLETED
+     */
+    progression: {
+      /** Delay (ms) from QUEUED before the call starts RINGING. */
+      queuedToRingingMs: number;
+      /** Duration (ms) the call rings before resolving to ANSWERED or UNANSWERED. */
+      ringingMs: number;
+      /** Delay (ms) from ANSWERED before the call reaches COMPLETED. */
+      answeredToCompletedMs: number;
+      /** Delay (ms) from UNANSWERED before the call reaches COMPLETED. */
+      unansweredToCompletedMs: number;
+      /**
+       * Probability (0–1) that a RINGING call is ANSWERED.
+       * The complement (1 − p) is the UNANSWERED probability.
+       */
+      answerProbability: number;
+    };
   };
 }
 
@@ -51,5 +75,18 @@ export default (): Configuration => ({
   call: {
     stateTtlSeconds: parseInt(process.env.CALL_STATE_TTL_SECONDS ?? '3600', 10),
     wsPublicUrl: process.env.WS_PUBLIC_URL ?? 'ws://localhost:3000/ws',
+    progression: {
+      queuedToRingingMs: parseInt(process.env.PROGRESSION_QUEUED_TO_RINGING_MS ?? '1000', 10),
+      ringingMs: parseInt(process.env.PROGRESSION_RINGING_MS ?? '2000', 10),
+      answeredToCompletedMs: parseInt(
+        process.env.PROGRESSION_ANSWERED_TO_COMPLETED_MS ?? '3000',
+        10,
+      ),
+      unansweredToCompletedMs: parseInt(
+        process.env.PROGRESSION_UNANSWERED_TO_COMPLETED_MS ?? '500',
+        10,
+      ),
+      answerProbability: parseFloat(process.env.PROGRESSION_ANSWER_PROBABILITY ?? '0.7'),
+    },
   },
 });
