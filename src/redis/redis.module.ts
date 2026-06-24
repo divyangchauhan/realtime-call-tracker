@@ -57,8 +57,9 @@ class RedisSubscriberLifecycleHost implements OnModuleDestroy {
  *    It carries no fail-fast knobs — a subscriber just needs to stay connected
  *    and ioredis re-subscribes automatically after a reconnect.
  *
- * PR #9 (BullMQ) will open a THIRD separate connection with maxRetriesPerRequest: null,
- * which is a BullMQ-specific requirement and must NOT be set here.
+ * BullMQ (PR #8, via @nestjs/bullmq) opens a THIRD separate connection with
+ * maxRetriesPerRequest: null, which is a BullMQ-specific requirement and must
+ * NOT be set here.
  */
 @Global()
 @Module({
@@ -79,8 +80,8 @@ class RedisSubscriberLifecycleHost implements OnModuleDestroy {
           // caller falls through to its log-and-continue path.
           //
           // NOTE: maxRetriesPerRequest: null is a BullMQ-only requirement and
-          // belongs ONLY on the SEPARATE BullMQ connections added in PR #9 — it
-          // must NOT be set here.
+          // belongs ONLY on the SEPARATE BullMQ connection (PR #8, created
+          // internally by @nestjs/bullmq) — it must NOT be set here.
           maxRetriesPerRequest: 3,
           commandTimeout: 2000,
           lazyConnect: false,

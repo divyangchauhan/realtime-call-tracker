@@ -15,6 +15,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { CallStatus } from '../database/entities/call-status.enum';
 import { RateLimiterService } from '../rate-limit/rate-limiter.service';
 import { REDIS_CLIENT } from '../redis/redis.constants';
+import { CallCompletionService } from './call-completion.service';
 import { CallProgressionService } from './call-progression.service';
 import { CallState, CallStateStore } from './call-state.store';
 
@@ -55,6 +56,7 @@ describe('CallProgressionService', () => {
   let stateStoreMock: { updateStatus: jest.Mock };
   let rateLimiterMock: { release: jest.Mock };
   let redisMock: { publish: jest.Mock };
+  let completionMock: { complete: jest.Mock };
 
   beforeEach(async () => {
     jest.useFakeTimers();
@@ -62,6 +64,8 @@ describe('CallProgressionService', () => {
     stateStoreMock = { updateStatus: jest.fn().mockResolvedValue(undefined) };
     rateLimiterMock = { release: jest.fn().mockResolvedValue(undefined) };
     redisMock = { publish: jest.fn().mockResolvedValue(1) };
+    // CallCompletionService mock: complete() resolves immediately (best-effort).
+    completionMock = { complete: jest.fn().mockResolvedValue(undefined) };
 
     const configMock = {
       get: jest.fn().mockReturnValue({
@@ -78,6 +82,7 @@ describe('CallProgressionService', () => {
         { provide: RateLimiterService, useValue: rateLimiterMock },
         { provide: REDIS_CLIENT, useValue: redisMock },
         { provide: ConfigService, useValue: configMock },
+        { provide: CallCompletionService, useValue: completionMock },
       ],
     }).compile();
 
@@ -159,6 +164,25 @@ describe('CallProgressionService', () => {
       expect(rateLimiterMock.release).toHaveBeenCalledWith('api-key-1', 'call-uuid-test');
     });
 
+    it('calls completion.complete exactly once on the COMPLETED transition', async () => {
+      jest.spyOn(service as any, 'pickRingOutcome').mockReturnValue(CallStatus.ANSWERED);
+
+      service.schedule(makeCallState());
+
+      await jest.advanceTimersByTimeAsync(
+        PROGRESSION_CONFIG.queuedToRingingMs +
+          PROGRESSION_CONFIG.ringingMs +
+          PROGRESSION_CONFIG.answeredToCompletedMs,
+      );
+
+      // completion.complete() must be called exactly once, with the state
+      // object whose status has been updated to COMPLETED.
+      expect(completionMock.complete).toHaveBeenCalledTimes(1);
+      expect(completionMock.complete).toHaveBeenCalledWith(
+        expect.objectContaining({ status: CallStatus.COMPLETED }),
+      );
+    });
+
     it('publishes to call:events channel (not some other channel)', async () => {
       jest.spyOn(service as any, 'pickRingOutcome').mockReturnValue(CallStatus.ANSWERED);
 
@@ -207,6 +231,23 @@ describe('CallProgressionService', () => {
 
       expect(rateLimiterMock.release).toHaveBeenCalledTimes(1);
       expect(rateLimiterMock.release).toHaveBeenCalledWith('api-key-1', 'call-uuid-test');
+    });
+
+    it('calls completion.complete exactly once on the COMPLETED transition (UNANSWERED path)', async () => {
+      jest.spyOn(service as any, 'pickRingOutcome').mockReturnValue(CallStatus.UNANSWERED);
+
+      service.schedule(makeCallState());
+
+      await jest.advanceTimersByTimeAsync(
+        PROGRESSION_CONFIG.queuedToRingingMs +
+          PROGRESSION_CONFIG.ringingMs +
+          PROGRESSION_CONFIG.unansweredToCompletedMs,
+      );
+
+      expect(completionMock.complete).toHaveBeenCalledTimes(1);
+      expect(completionMock.complete).toHaveBeenCalledWith(
+        expect.objectContaining({ status: CallStatus.COMPLETED }),
+      );
     });
   });
 
@@ -316,6 +357,29 @@ describe('CallProgressionService', () => {
       ).resolves.not.toThrow();
 
       expect(stateStoreMock.updateStatus).toHaveBeenCalledTimes(3);
+      expect(rateLimiterMock.release).toHaveBeenCalledTimes(1);
+    });
+
+    it('still releases the slot if completion.complete() unexpectedly rejects', async () => {
+      jest.spyOn(service as any, 'pickRingOutcome').mockReturnValue(CallStatus.ANSWERED);
+
+      // complete() is documented as never-throwing, but guard the invariant:
+      // even if it rejects, the COMPLETED transition must still release the slot
+      // (the timer callback must not crash and the concurrency slot must drain).
+      completionMock.complete.mockRejectedValueOnce(new Error('completion blew up'));
+
+      await expect(
+        (async () => {
+          service.schedule(makeCallState());
+          await jest.advanceTimersByTimeAsync(
+            PROGRESSION_CONFIG.queuedToRingingMs +
+              PROGRESSION_CONFIG.ringingMs +
+              PROGRESSION_CONFIG.answeredToCompletedMs,
+          );
+        })(),
+      ).resolves.not.toThrow();
+
+      expect(completionMock.complete).toHaveBeenCalledTimes(1);
       expect(rateLimiterMock.release).toHaveBeenCalledTimes(1);
     });
   });
