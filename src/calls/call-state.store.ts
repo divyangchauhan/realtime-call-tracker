@@ -35,6 +35,18 @@ function callKey(id: string): string {
 }
 
 /**
+ * Redis SET holding the IDs of calls whose Redis status is ahead of the
+ * Postgres `calls.status` column (i.e. an intermediate write-behind
+ * transition has not yet been reconciled to Postgres). A plain string — not
+ * per-id formatted — since the set itself is the single shared key.
+ *
+ * CallProgressionService adds IDs here on every non-terminal transition;
+ * CallFlushService (PR #10) periodically drains it, writing each ID's latest
+ * status to Postgres and removing it on success.
+ */
+const DIRTY_SET_KEY = 'calls:dirty';
+
+/**
  * Thin store that wraps Redis hash operations for live call state.
  *
  * Why a separate Redis representation alongside Postgres?
@@ -201,5 +213,35 @@ export class CallStateStore {
       createdAt: raw['createdAt'] ?? '',
       updatedAt: raw['updatedAt'] ?? '',
     };
+  }
+
+  /**
+   * Mark a call as "dirty": its Redis status is ahead of the Postgres row.
+   * Called by the progression engine after every non-terminal write-behind
+   * transition so CallFlushService (PR #10) knows which IDs to reconcile.
+   *
+   * A single SADD — no pipeline needed.  Best-effort from the caller's
+   * perspective: the caller should catch and log rather than let a failure
+   * here break the state machine.
+   */
+  async markDirty(id: string): Promise<void> {
+    await this.redis.sadd(DIRTY_SET_KEY, id);
+  }
+
+  /**
+   * Read every call ID currently marked dirty.
+   * Returns an empty array when the set does not exist or is empty.
+   */
+  async readDirtyIds(): Promise<string[]> {
+    return this.redis.smembers(DIRTY_SET_KEY);
+  }
+
+  /**
+   * Clear a call's dirty marker once its status has been reconciled to
+   * Postgres (or once reconciliation is no longer meaningful, e.g. the Redis
+   * hash has already expired).
+   */
+  async clearDirty(id: string): Promise<void> {
+    await this.redis.srem(DIRTY_SET_KEY, id);
   }
 }

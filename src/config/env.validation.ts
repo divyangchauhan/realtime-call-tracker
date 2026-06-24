@@ -146,6 +146,14 @@ class EnvironmentVariables {
   @IsOptional()
   @IsString()
   MOCK_RECORDING_PATH: string = 'assets/mock_recording.mp3';
+
+  // ── Flush reconciliation (PR #10) ───────────────────────────────────────────
+
+  /** Period (ms) between CallFlushService passes that reconcile write-behind. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  FLUSH_INTERVAL_MS: number = 5000;
 }
 
 /**
@@ -183,6 +191,8 @@ export function validate(config: Record<string, unknown>): EnvironmentVariables 
       config.PROGRESSION_ANSWER_PROBABILITY !== undefined
         ? Number(config.PROGRESSION_ANSWER_PROBABILITY)
         : 0.7,
+    FLUSH_INTERVAL_MS:
+      config.FLUSH_INTERVAL_MS !== undefined ? Number(config.FLUSH_INTERVAL_MS) : 5000,
   };
 
   const validatedConfig = plainToInstance(EnvironmentVariables, normalized, {

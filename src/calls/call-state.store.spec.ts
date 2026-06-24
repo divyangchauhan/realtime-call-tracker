@@ -18,12 +18,18 @@ describe('CallStateStore', () => {
   let redisMock: {
     pipeline: jest.Mock;
     hgetall: jest.Mock;
+    sadd: jest.Mock;
+    smembers: jest.Mock;
+    srem: jest.Mock;
   };
 
   beforeEach(async () => {
     redisMock = {
       pipeline: jest.fn(),
       hgetall: jest.fn(),
+      sadd: jest.fn().mockResolvedValue(1),
+      smembers: jest.fn().mockResolvedValue([]),
+      srem: jest.fn().mockResolvedValue(1),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -310,6 +316,57 @@ describe('CallStateStore', () => {
 
       const result = await store.read('uuid-1');
       expect(result!.recordingUrl).toBe('https://s3.example.com/r.mp3');
+    });
+  });
+
+  // ── markDirty / readDirtyIds / clearDirty (PR #10) ──────────────────────────
+
+  describe('markDirty', () => {
+    it('SADDs the id to the dirty set', async () => {
+      await store.markDirty('uuid-7');
+
+      expect(redisMock.sadd).toHaveBeenCalledTimes(1);
+      expect(redisMock.sadd).toHaveBeenCalledWith('calls:dirty', 'uuid-7');
+    });
+
+    it('propagates a Redis error to the caller', async () => {
+      redisMock.sadd.mockRejectedValue(new Error('Connection is closed.'));
+
+      await expect(store.markDirty('uuid-7')).rejects.toThrow('Connection is closed.');
+    });
+  });
+
+  describe('readDirtyIds', () => {
+    it('SMEMBERS the dirty set and returns the array', async () => {
+      redisMock.smembers.mockResolvedValue(['uuid-7', 'uuid-8']);
+
+      const ids = await store.readDirtyIds();
+
+      expect(redisMock.smembers).toHaveBeenCalledWith('calls:dirty');
+      expect(ids).toEqual(['uuid-7', 'uuid-8']);
+    });
+
+    it('returns an empty array when the dirty set is empty', async () => {
+      redisMock.smembers.mockResolvedValue([]);
+
+      const ids = await store.readDirtyIds();
+
+      expect(ids).toEqual([]);
+    });
+  });
+
+  describe('clearDirty', () => {
+    it('SREMs the id from the dirty set', async () => {
+      await store.clearDirty('uuid-7');
+
+      expect(redisMock.srem).toHaveBeenCalledTimes(1);
+      expect(redisMock.srem).toHaveBeenCalledWith('calls:dirty', 'uuid-7');
+    });
+
+    it('propagates a Redis error to the caller', async () => {
+      redisMock.srem.mockRejectedValue(new Error('Connection is closed.'));
+
+      await expect(store.clearDirty('uuid-7')).rejects.toThrow('Connection is closed.');
     });
   });
 });

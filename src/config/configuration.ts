@@ -83,6 +83,15 @@ export interface Configuration {
       answerProbability: number;
     };
   };
+  /**
+   * Write-behind reconciliation flush (PR #10).
+   * CallFlushService periodically drains the Redis dirty set and writes each
+   * call's latest non-terminal status through to Postgres.
+   */
+  flush: {
+    /** Period (ms) between flush passes. Default 5000 (5s). */
+    intervalMs: number;
+  };
 }
 
 export default (): Configuration => ({
@@ -136,5 +145,8 @@ export default (): Configuration => ({
       ),
       answerProbability: parseFloat(process.env.PROGRESSION_ANSWER_PROBABILITY ?? '0.7'),
     },
+  },
+  flush: {
+    intervalMs: parseInt(process.env.FLUSH_INTERVAL_MS ?? '5000', 10),
   },
 });
