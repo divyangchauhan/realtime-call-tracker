@@ -7,6 +7,7 @@ import { AuthModule } from './auth/auth.module';
 import { CallsModule } from './calls/calls.module';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
+import { MetricsModule } from './metrics/metrics.module';
 import { RedisModule } from './redis/redis.module';
 import { WebsocketModule } from './websocket/websocket.module';
 
@@ -48,6 +49,8 @@ import { WebsocketModule } from './websocket/websocket.module';
     // queue producer (RecordingDispatchService) dispatched on COMPLETED (PR #8).
     CallsModule,
     HealthModule,
+    // PR #11: GET /metrics — per-API-key operational snapshot.
+    MetricsModule,
     // WebsocketModule registers CallsGateway which streams live call-state
     // transitions to connected WS clients (PR #7).
     WebsocketModule,
